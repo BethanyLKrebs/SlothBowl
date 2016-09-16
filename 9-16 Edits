@@ -1,0 +1,511 @@
+#include "Wire.h"
+#include <avr/sleep.h>
+#include <avr/power.h>
+#include <avr/wdt.h>
+#include <Servo.h> //include servo module
+#define DS3231_I2C_ADDRESS 0x68
+boolean alarm_fired = 0;
+int time_check[2];
+int* time_now;
+Servo myservo; //identify servo
+int Alarm_Params[7]; //
+int Alarm_Index=0;
+//*******SET ALARM PARAMETERS HERE***************************
+int wake_hour = 0; //For Alarm 1 wake up to small sweep servo arm, set hours here (A1_Opt =4 ONLY)
+int wake_min = 15; //For Alarm 1 wake up to small sweep servo arm, set minutes here (A1_Opt = 3 or 4)
+int wake_sec = 10; //For Alarm 1 wake up to small sweep servo arm, set seconds here (A1_Opt = 2,3, or 4)
+int target_hour = 0; //For Alarm 2 wake up and open box, set hour here (A2_Opt = 3 ONLY)
+int target_min= 10; // For Alarm 2 wake up and open box, set minute here (A2_Opt = 2 or 3)
+int Alarm1_ON = 1; //Alarm 1 on or off, 1 is on, 0 is off
+int Alarm2_ON =1; //Alarm 2 on or off, 1 is on, 0 is off
+int Alarm1_Opt = 3; //Choose alarm 1 settings-  1: 1x Sec    2: On sec match    3: On min/sec match
+int Alarm2_Opt = 3; //Choose alarm 2 settings - 1: 1x Min    2: On min match    3: On min/hour match
+
+
+char* Alarm1_Opts[]={"1: 1x Sec", "2: On sec match", "3: On min/sec match",
+"4: On hrs/min/sec match"};
+char* Alarm2_Opts[]={"1: 1x Min","2: On min match","3: On min/hour match"};
+
+
+// Convert normal decimal numbers to binary coded decimal
+byte decToBcd(byte val)
+{
+  return( (val/10*16) + (val%10) );
+}
+
+// Convert binary coded decimal to normal decimal numbers
+byte bcdToDec(byte val)
+{
+  return( (val/16*10) + (val%16) );
+}
+
+void setDS3231time(byte second, byte minute, byte hour, byte dayOfWeek, byte dayOfMonth, byte month, byte year){
+  // sets time and date data to DS3231
+  Wire.beginTransmission(DS3231_I2C_ADDRESS);
+  Wire.write(0); // set next input to start at the seconds register
+  Wire.write(decToBcd(second)); // set seconds
+  Wire.write(decToBcd(minute)); // set minutes
+  Wire.write(decToBcd(hour)); // set hours
+  Wire.write(decToBcd(dayOfWeek)); // set day of week (1=Sunday, 7=Saturday)
+  Wire.write(decToBcd(dayOfMonth)); // set date (1 to 31)
+  Wire.write(decToBcd(month)); // set month
+  Wire.write(decToBcd(year)); // set year (0 to 99)
+  Wire.endTransmission();
+}
+
+void readDS3231time(byte *second,byte *minute,byte *hour,byte *dayOfWeek,byte *dayOfMonth,byte *month,byte *year)
+{  
+  Wire.beginTransmission(DS3231_I2C_ADDRESS);
+  Wire.write(0); // set DS3231 register pointer to 00h
+  Wire.endTransmission();
+  Wire.requestFrom(DS3231_I2C_ADDRESS, 7);
+  // request seven bytes of data from DS3231 starting from register 00h
+  *second = bcdToDec(Wire.read() & 0x7f);
+  *minute = bcdToDec(Wire.read());
+  *hour = bcdToDec(Wire.read() & 0x3f);
+  *dayOfWeek = bcdToDec(Wire.read());
+  *dayOfMonth = bcdToDec(Wire.read());
+  *month = bcdToDec(Wire.read());
+  *year = bcdToDec(Wire.read());
+}
+
+
+void SetBothAlarms(int params[]){       //byte input_hours, byte input_minutes, byte input_seconds){
+  Wire.beginTransmission(DS3231_I2C_ADDRESS);
+  Wire.write(7); //Open Alarm 1 seconds register
+                    //                  Bit 7     Bit 6     Bit 5     Bit 4     Bit 3     Bit 2     Bit 1     Bit 0
+                  // Address 0x7  A1M1 Mask Bit   10 Sec    10 Sec    10 Sec    1 Sec     1 Sec     1 Sec     1 Sec
+                  // Address 0x8  A1M2 Mask Bit   10 Min    10 Min    10 Min    1 Min     1 Min     1 Min     1 Min
+                  // Address 0X9  A1M3 Mask Bit   12/24    AM/PM or10Hr* 10 Hr  1 Hours  1 Hours  1 Hours  1 Hours  (*Depends on Bit 6 value)
+                  // Address 0xA  A1M4 Mask Bit   DY/DT   10 Date     10 Date   Day/Date*  Day/Date*  Day/Date*  Day/Date*  (*Depends on Bit 6 value)
+                  
+                  //Mask Bits Alarm 1                       DY/DT      A1M4      A1M3      A1M2      A1M1
+                  //Alarm Once per second                     X          1         1         1         1
+                  //Alarm when seconds match                  X          1         1         1         0
+                  //Alarm when minutes & secs match           X          1         1         0         0   
+                  //Alarm when hrs/minutes/secs match         X          1         0         0         0
+                  //Alrm when date/hours/mins/secs match      0          0         0         0         0   
+                  //Alarm when days/hours/mins/secs match     1          0         0         0         0    
+                  //Alarm_Params[0] = A1_sec_val;
+                  //Alarm_Params[1] = A1_min_val;
+                  //Alarm_Params[2] = A1_hour_val;
+                  //Alarm_Params[3] = A1_date_val;
+                  //Alarm_Params[4] = A2_min_val;
+                  //Alarm_Params[5] = A2_hour_val;
+                  //Alarm_Params[6] = A2_date_val;
+           
+ ///ALARM 1 *****
+  Wire.write(Alarm_Params[0]); //Write A1_sec_val to A1M1 (10 seconds)
+  Wire.write(Alarm_Params[1]); //Write A1_min_val to A1M2 (10 minutes)
+  Wire.write(Alarm_Params[2]); //Write A1_hour_val to A1M3 When bit 6 is 0, bits 4 and 5 are the 10 hour bits (4 = 1, 5 =2).  When bit 6 is 1, bit 5 is the AM/PM with 1 = PM
+  Wire.write(Alarm_Params[3]); //Write A1_date_val (should be 0x80 by default)  to A1M4 DY/DT which indicates day of week (DY/DT = 0) or date of month (DY/DT = 1)
+  Serial.println("Alarm 1 set!");
+  
+  //ALARM 2*****
+                   //                    Bit 7     Bit 6     Bit 5     Bit 4     Bit 3     Bit 2     Bit 1     Bit 0
+                  // Address 0xB  A2M2 Mask Bit   10 Min    10 Min    10 Min    1 Min     1 Min     1 Min     1 Min
+                  // Address 0xC  A2M3 Mask Bit   12/24    AM/PM or10Hr* 10 Hr   1 Hours   1 Hours   1 Hours   1 Hours  (*Depends on Bit 6 value)
+                  // Address 0XD  A2M4 Mask Bit   DY/DT   10 Date     10 Date   Day/Date*  Day/Date*  Day/Date*  Day/Date*  (*Depends on Bit 6 value)
+
+                  //Mask Bits Alarm 2           DY/DT       A2M4        A2M3      A2M2
+                  //Alarm once per min            X         1           1         1
+                  //Alarm when mins match         X         1           1         0
+                  //Alarm when hours/mins match   X         1           0         0
+                  //Alarm when dates/hrs/mins     0         0           0         0
+                  //Alarm when day/hrs/mins       1         0           0         0
+                  
+  Wire.write(Alarm_Params[4]); // Write minutes alarm to A2M2 
+  Wire.write(Alarm_Params[5]); // Write A2M3 alarm registry (0x80 writes bit 8 to 1 for the mask bit to set the alarm and sets bit 6 (12/24) to 0 for 24 hour time.
+                    // When bit 6 is 0, bits 4 and 5 are the 10 hour bits (4 = 1, 5 =2).  When bit 6 is 1, bit 5 is the AM/PM with 1 = PM
+  Wire.write(Alarm_Params[6]); // Write A2M4 alarm registry (0xC0 writes in mask bit and DY/DT which indicates day of week (DY/DT = 0) or date of month (DY/DT = 1)
+  Wire.endTransmission();
+  Serial.println("Alarm 2 set");
+  
+  Wire.beginTransmission(DS3231_I2C_ADDRESS);
+  Wire.write(0xE); //Open control register
+  Wire.requestFrom(DS3231_I2C_ADDRESS, 1);
+  byte ctrl = Wire.read(); //Read current settings of control register into ctrl variable
+  Wire.endTransmission();
+  
+  Serial.print("ctrl read:"); //Print 
+  Serial.println(ctrl,BIN); //Print ctrl value in HEX
+  ctrl = (ctrl & ~0x07 ) | 0x47; // Bitwise evaluate ctrl value and not 111 (clear INTCN, A2IE, A1IE)
+                                 // Bitwise OR in 01000101 (BBSQW = 1, whatever default settings on bits 3-5 are, INTCN =1, A2IE = 0, A1IE =1).
+                                //BBSQW =1 enables battery power interrupt, INTCN needs to be set to 1 to enable alarm interrupt, A2IE and A1IE enable interrupt for alarms 2 & 1 respectively
+  Wire.beginTransmission(DS3231_I2C_ADDRESS);
+  Wire.write(0x0E); //Open control register
+  Wire.write(ctrl); //Write ctrl value to control register
+  Wire.endTransmission();
+  Serial.print("Ctrl written: ");
+  Serial.println(ctrl,BIN);
+
+  Wire.beginTransmission(DS3231_I2C_ADDRESS);
+  Wire.write(0xF); //Open status resgister
+  Wire.requestFrom(DS3231_I2C_ADDRESS, 1); //Request 1 byte from status register
+  byte stat = Wire.read(); // Read current status settings from register to stat variable
+  Wire.endTransmission();
+  Serial.print("stat read:");
+  Serial.println(stat,BIN); //Print stat variable in HEX
+  
+  stat &= ~0x3; //stat value and not 1, Bit 0 is A1F (Alarm 1 Flag) which can only be set low
+  Wire.beginTransmission(DS3231_I2C_ADDRESS);
+  Wire.write(0x0F); //Open status register
+  Wire.write(stat); //Write stat value to status register
+  Wire.endTransmission();
+  Serial.print("Stat written: ");
+  Serial.println(stat,BIN);
+  Serial.println("Both alarms set!");
+  delay(750);
+}
+
+char rx1_byte = 3;
+void Set_Alarm1_Opts(int A1_Bin, int params[]) {
+  //if(A1_Bin ==1 && rx1_byte <= 0){
+  //Serial.println("Which alarm options would you like? Pick a number");
+  //for(int j = 0; j<4;j++){
+  //  Serial.println(Alarm1_Opts[j]);
+  //  delay(500);
+ // }
+  //}
+ // while (!Serial.available()){
+ // }
+  //if (Serial.available() > 0) {    // is a character available?
+   // rx1_byte = Serial.read();       // get the character
+   // Serial.println(rx1_byte);
+    // check if a number was received
+    if (rx1_byte == '1') {
+      params[0] = params[0]|0x80;
+      params[1] = params[1]|0x80;
+      params[2] = params[2]|0x80;
+      Serial.println("Alarm 1x per second set");
+    }
+    if(rx1_byte =='2'){
+      params[1] = params[1] | 0x80;
+      params[2] = params[2] | 0x80;
+      Serial.println("Alarm when seconds match set");
+    }
+    if(rx1_byte =='3'){
+      params[2] = params[2] | 0x80;
+      Serial.println("Alarm when minutes and seconds match set");
+    }
+    if(rx1_byte =='4'){
+      Serial.println("Alarm when hours, minutes and seconds match set");
+    //}
+     // Serial.print("Number received: ");
+   //  Serial.println(rx1_byte);
+    }//else {
+     // Serial.println("Invalid Choice, pick again");
+ // }
+    if(A1_Bin ==1 && rx1_byte > 0){
+      Serial.println("Alarm1 options chosen, continuing");
+    }
+  } // end: if (Serial.available() > 0)
+
+void flushReceive(){
+while(Serial.available())
+  Serial.read();
+}
+
+char rx2_byte = 2;
+void Set_Alarm2_Opts(int A2_Bin, int params[]) {
+  //if(A2_Bin ==1 && rx2_byte <= 0){
+  //Serial.println("Which alarm options would you like? Pick a number");
+ // for(int j = 0; j<3;j++){
+   // Serial.println(Alarm2_Opts[j]);
+  //  delay(500);
+//  }
+  //}
+ // while (!Serial.available()){
+ //}
+  //if (Serial.available() > 0) {    // is a character available?
+  //  rx2_byte = Serial.read();       // get the character
+   // Serial.println(rx2_byte);
+    // check if a number was received
+    if (rx2_byte == '1') {
+      params[4] = params[4]|0x80;
+      params[5] = params[5]|0x80;
+      Serial.println("Alarm 1x per min set");
+    }
+    if(rx2_byte =='2'){
+      params[5] = params[5] | 0x80;
+      Serial.println("Alarm when minutes match set");
+    }
+    if(rx2_byte =='3'){
+      Serial.println("Alarm when minutes and hours match set");
+   // }
+   //   Serial.print("Number received: ");
+   //   Serial.println(rx2_byte);
+   }
+   //else {
+   //   Serial.println("Invalid Choice, pick again");
+//  }
+    if(A2_Bin ==1 && rx2_byte > 0){
+      Serial.println("Alarm2 options chosen, continuing");
+    }
+  } // end: if (Serial.available() > 0)
+
+  
+
+
+void Alarm_Translate(int A1_Sec,int A1_Min, int A1_Hours,int A2_Min, int A2_Hours,int params[], int A1_Bin = 0, int A2_Bin = 0,int A1_Opts = 0, int A2_Opts = 0){
+  if(A1_Bin == 1){
+        if(A1_Opts == 1){
+            params[0] = 0x80;
+            params[1] = 0x80;
+            params[2] = 0x80;
+            params[3] = 0x80;
+            Serial.println("Alarm1 1x sec translated");
+        }
+        if(A1_Opts ==2){
+            params[0] = decToBcd(A1_Sec);
+            params[1] = 0x80;
+            params[2] = 0x80;
+            params[3] = 0x80;
+            Serial.println("Alarm1 when seconds match translated");
+          }
+      if(A1_Opts ==3){
+          params[0] = decToBcd(A1_Sec);
+          params[1] = decToBcd(A1_Min);
+          params[2] = 0x80;
+          params[3] = 0x80;
+          Serial.println("Alarm1 when minutes and seconds match translated");
+          }
+      if(A1_Opts ==4){
+          params[0] = decToBcd(A1_Sec);
+          params[1] = decToBcd(A1_Min);
+          params[2] = decToBcd(A1_Hours);
+          params[3] = 0x80;
+          Serial.println("Alarm1 when hours, minutes and seconds match translated");
+        }
+       if(A1_Opts == 0 || A1_Opts > 4){
+          Serial.println("Error - A1_Opts out of range, alarm not set");
+       }
+        Serial.println("Alarm 1 values translated");  
+        Serial.println("Alarm 1 seconds: ");
+        Serial.print(params[0]);
+        Serial.println("Alarm 1 minutes: ");
+        Serial.print(params[1]);
+        Serial.println("Alarm 1 hours: ");
+        Serial.print(params[2]);  
+    }
+  if(A1_Bin == 0){
+      params[0] = 0;
+      params[1]= 0;
+      params[2]= 0;
+      params[3]= 0;
+      Serial.println("Alarm 1 not set");
+  }
+  if(A1_Bin > 1){
+    Serial.println("Alarm 1 binary response out of range, alarm 1 not set");
+  }
+  if(A2_Bin ==1){ 
+      if(A2_Opts ==1){
+          params[4] = 0x80;
+          params[5] = 0x80;
+          params[6] = 0x80;
+      }
+      if(A2_Opts ==2){
+          params[4] = decToBcd(A2_Min);
+          params[5] = 0x80;
+          params[6] = 0x80;
+      }
+      if(A2_Opts ==3){
+          params[4] = decToBcd(A2_Min);
+          params[5] = decToBcd(A2_Hours);
+          params[6] = 0x80;
+      }
+      if(A2_Opts ==0 || A2_Opts >3){
+        Serial.println("Alarm2 options out of range, alarm 2 not translated");
+      }
+        Serial.println("Alarm 2 values translated");  
+        Serial.println("Alarm 2 seconds: ");
+        Serial.print(params[4]);
+        Serial.println("Alarm 2 minutes: ");
+        Serial.print(params[5]);
+  }
+  
+  if(A2_Bin == 0){
+    params[4] = 0;
+    params[5]= 0;
+    params[6]= 0;
+    Serial.println("Alarm 2 not set");
+  }
+
+}
+
+void Alarm_Fired(){
+alarm_fired = 1;
+}
+
+void readDS3231Min(byte *minute){
+  Wire.beginTransmission(DS3231_I2C_ADDRESS);
+  Wire.write(1); // set DS3231 register pointer to 02h
+  Wire.endTransmission();
+  Wire.requestFrom(DS3231_I2C_ADDRESS, 1);
+  // request 1 bytes of data from DS3231 starting from register 00h
+ *minute = bcdToDec(Wire.read());
+}
+
+void readDS3231Hour(byte *hour){
+  Wire.beginTransmission(DS3231_I2C_ADDRESS);
+  Wire.write(2); // set DS3231 register pointer to 02h
+  Wire.endTransmission();
+  Wire.requestFrom(DS3231_I2C_ADDRESS,1);
+  // request 1 bytes of data from DS3231 starting from register 00h
+ *hour = bcdToDec(Wire.read() & 0x3f);
+}
+
+void Time_Check(int time_now[]){
+  byte minute, hour;
+  readDS3231Hour(&hour);
+  readDS3231Min(&minute);
+  time_now[0] = hour,DEC;
+  time_now[1] = minute,DEC;
+}
+
+void displayTimeCheck(){
+  byte minute, hour;
+  readDS3231Hour(&hour);
+  readDS3231Min(&minute);
+  Serial.print(hour,DEC);
+  Serial.println(minute,DEC);
+}
+
+void displayTime()
+{
+  byte second, minute, hour, dayOfWeek, dayOfMonth, month, year;
+  // retrieve data from DS3231
+  readDS3231time(&second, &minute, &hour, &dayOfWeek, &dayOfMonth, &month, &year);
+  // send it to the serial monitor
+  Serial.print(hour, DEC);
+  // convert the byte variable to a decimal number when displayed
+  Serial.print(":");
+  if (minute<10)
+  {
+    Serial.print("0");
+  }
+ Serial.print(minute, DEC);
+  Serial.print(":");
+  if (second<10)
+  {
+    Serial.print("0");
+  }
+  Serial.print(second, DEC);
+  Serial.print(" ");
+  Serial.print(dayOfMonth, DEC);
+  Serial.print("/");
+  Serial.print(month, DEC);
+  Serial.print("/");
+  Serial.println(year, DEC);
+//  Serial.print(" Day of week: ");
+ // switch(dayOfWeek){
+ // case 1:
+   // Serial.println("Sunday");
+    //break;
+ // case 2:
+//    Serial.println("Monday");
+//    break;
+  //case 3:
+//    Serial.println("Tuesday");
+//    break;
+//  case 4:
+//    Serial.println("Wednesday");
+//    break;
+//  case 5:
+//    Serial.println("Thursday");
+//    break;
+//  case 6:
+//    Serial.println("Friday");
+//    break;
+//  case 7:
+//    Serial.println("Saturday");
+//    break;
+}
+
+
+void enterSleep(){
+  byte minute,hour;
+  int time_now;
+ set_sleep_mode(SLEEP_MODE_PWR_DOWN);   /* EDIT: could also use SLEEP_MODE_PWR_DOWN for lowest power consumption. */
+  sleep_enable();
+  
+  /* Now enter sleep mode. */
+ sleep_mode();
+  
+  /* The program will continue from here after the WDT timeout*/
+  sleep_disable(); /* First thing to do is disable sleep. */
+  
+  /* Re-enable the peripherals. */
+ power_all_enable();
+ Time_Check(time_check);
+ Serial.println("Waking up!");
+ Serial.println(alarm_fired);
+ delay(500); 
+ displayTimeCheck();
+ Wire.beginTransmission(DS3231_I2C_ADDRESS);
+  Wire.write(0xF); //Open status resgister
+  Wire.requestFrom(DS3231_I2C_ADDRESS, 1); //Request 1 byte from status register
+  byte stat = Wire.read(); // Read current status settings from register to stat variable
+  Wire.endTransmission();
+  stat &= ~0x3; //stat value and not 1, Bit 0 is A1F (Alarm 1 Flag) which can only be set low
+  Wire.beginTransmission(DS3231_I2C_ADDRESS);
+  Wire.write(0x0F); //Open status register
+  Wire.write(stat); //Write stat value to status register
+  Wire.endTransmission();
+ 
+}
+
+
+void setup() {
+  Wire.begin();
+  Serial.begin(9600);
+  // initialize the button pin as a input:
+  pinMode(3, INPUT);
+  pinMode(4, OUTPUT);
+  myservo.attach(11); //Attach servo to pin 5
+  myservo.write(100);
+  //setDS3231time(02,6,9,6,16,9,16);
+  Alarm_Translate(wake_sec,wake_min,wake_hour,target_min,target_hour,Alarm_Params,Alarm1_ON, Alarm2_ON,Alarm1_Opt,Alarm2_Opt); //10 seconds, 15 min after the hour (0 hours), sets alarm 2 to target_min and target_hour
+  SetBothAlarms(Alarm_Params);
+  delay(1000);
+  attachInterrupt(digitalPinToInterrupt(3),Alarm_Fired,CHANGE);
+}
+
+
+void loop() {
+  displayTime();
+  delay(1000);
+  if(alarm_fired ==1 && time_check[1]== target_min){ //time_check[0] == target_hour && 
+    Serial.println("Alarm fired loop!");
+    Wire.beginTransmission(DS3231_I2C_ADDRESS);
+  Wire.write(0xF); //Open status resgister
+  Wire.requestFrom(DS3231_I2C_ADDRESS, 1); //Request 1 byte from status register
+  byte stat = Wire.read(); // Read current status settings from register to stat variable
+  Wire.endTransmission();
+  Serial.print("stat read:");
+  Serial.println(stat,BIN); //Print stat variable in HEX
+  
+ // stat &= ~0x3; //stat value and not 1, Bit 0 is A1F (Alarm 1 Flag) which can only be set low
+// Wire.beginTransmission(DS3231_I2C_ADDRESS);
+ // Wire.write(0x0F); //Open status register
+//  Wire.write(stat); //Write stat value to status register
+ // Wire.endTransmission();
+ digitalWrite(4,HIGH);
+ delay(500);
+ myservo.write(0);
+ delay(1000);
+ digitalWrite(4,LOW);
+ myservo.write(100);
+ delay(1000);
+ alarm_fired = 0;
+ }else{
+  myservo.write(110);
+  delay(500);
+  myservo.write(100);
+   Serial.println("No alarm, going to sleep...");
+   delay(500);
+   enterSleep();
+ }
+ 
+   
+}
